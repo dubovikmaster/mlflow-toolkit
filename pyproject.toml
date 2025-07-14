@@ -1,0 +1,25 @@
+[build-system]
+requires = ["flit_core >=3.2,<4"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "mlflow-toolkit"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.7"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Dubovik Pavel", email = "geometryk@gmail.com" }
+]
+dependencies = [
+  "mlflow",
+  "PyYAML",
+
+]
+
+[project.optional-dependencies]
+extras = ["dill", "joblib"]
+
+[project.urls]
+Homepage = "https://github.com/dubovikmaster/mlflow-toolkit"
