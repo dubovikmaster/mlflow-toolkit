@@ -482,4 +482,4 @@ class FileHandler:
             True if the file is a pickle file, False otherwise.
         """
         file_path = FileHandler._file_path_prepare(file_path)
-        return any(suffix in ['.pkl', '.pickle', 'joblib'] for suffix in file_path.suffixes)
+        return any(suffix in ['.pkl', '.pickle', '.joblib', '.dill'] for suffix in file_path.suffixes)
