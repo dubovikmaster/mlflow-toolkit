@@ -6,11 +6,13 @@ from typing import (
     Any,
     Union,
     Dict,
-    TypeAlias
+    TypeAlias,
+    Optional,
 )
 import logging
 import pickle
 from os import PathLike
+import warnings
 
 try:
     import joblib
@@ -60,6 +62,29 @@ class FileHandler:
     """
 
     @staticmethod
+    def _auto_detect_serialization_backend(file_path: FilePath) -> str:
+        """
+        Automatically detects the backend to use for saving files based on the file extension.
+        It supports 'pickle', 'dill', and 'joblib' backends.
+
+        Parameters:
+            file_path: The path of the file to be saved.
+        Returns:
+            The detected backend as a string.
+        """
+        if not isinstance(file_path, PathLike):
+            file_path = Path(file_path)
+        if file_path.suffix in ['.pkl', '.pickle']:
+            return 'pickle'
+        elif file_path.suffix == '.dill':
+            return 'dill'
+        elif file_path.suffix == '.joblib':
+            return 'joblib'
+        else:
+            warnings.warn(f"The serialization backend was not recognized. Set backend to 'pickle'")
+            return 'pickle'
+
+    @staticmethod
     def _file_path_prepare(path: FilePath):
         """
         Prepares and validates a file path input by ensuring it is of the correct
@@ -76,7 +101,7 @@ class FileHandler:
         return path
 
     @staticmethod
-    def load_pickle_file(file_path: FilePath, backend: str = 'pickle', **kwargs) -> Any:
+    def load_pickle_file(file_path: FilePath, backend: Optional[str] = None, **kwargs) -> Any:
         """
         Static method to load and deserialize an object from a pickle file. It reads binary data
         from the given file path and reconstructs the original object using Python's pickle module.
@@ -96,6 +121,8 @@ class FileHandler:
         with the corresponding error logged.
         """
         logger.info(f"Loading pickle file from {file_path}")
+        if backend is None:
+            backend = FileHandler._auto_detect_serialization_backend(file_path)
         try:
             if backend == 'pickle':
                 with open(file_path, 'rb') as f:
@@ -255,7 +282,7 @@ class FileHandler:
             raise
 
     @staticmethod
-    def save_pickle_file(obj, file_path: FilePath, backend: str = 'pickle', **kwargs):
+    def save_pickle_file(obj, file_path: FilePath, backend: Optional[str] = None, **kwargs):
         """
         Save an object to a pickle file.
 
@@ -265,7 +292,7 @@ class FileHandler:
         Parameters:
             obj: The object to be saved as a pickle file.
             file_path (Path): The directory path where the pickle file will be saved.
-            backend: The backend to use for saving the file. Defaults to 'pickle'.
+            backend: The backend to use for saving the file. Defaults None.
             kwargs: Additional keyword arguments to be passed to the pickle dump function.
 
         Raises:
@@ -273,6 +300,8 @@ class FileHandler:
             and re-raises the exception.
         """
         logger.info(f"Saving {file_path} has begun")
+        if backend is None:
+            backend = FileHandler._auto_detect_serialization_backend(file_path)
         try:
             if backend == 'pickle':
                 with open(file_path, 'wb') as file:
