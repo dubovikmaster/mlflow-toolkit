@@ -4,7 +4,7 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "mlflow-toolkit"
-version = "0.4.0"
+version = "0.3.0"
 description = "Symmetric log/load helpers for MLflow artifacts: dataframes, dicts, pickles and more."
 readme = "README.md"
 requires-python = ">=3.10"

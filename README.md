@@ -24,11 +24,11 @@ path suffix.
 ## Installation
 
 ```bash
-pip install git+https://github.com/dubovikmaster/mlflow-toolkit.git
+pip install mlflow-toolkit
 # with dill/joblib backends:
-pip install "mlflow-toolkit[extras] @ git+https://github.com/dubovikmaster/mlflow-toolkit.git"
+pip install "mlflow-toolkit[extras]"
 # with polars support:
-pip install "mlflow-toolkit[polars] @ git+https://github.com/dubovikmaster/mlflow-toolkit.git"
+pip install "mlflow-toolkit[polars]"
 ```
 
 Requires Python >= 3.10.

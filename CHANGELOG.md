@@ -1,28 +1,5 @@
 # Changelog
 
-## 0.4.0 (2026-07-14)
-
-### Added
-
-- **Format registry** (`mlflow_toolkit.formats`): file formats are now resolved through
-  a suffix → handler registry instead of hard-coded `if/elif` chains. New public API:
-  `register_format`, `get_format_handler`, `registered_suffixes`, `FormatHandler` —
-  register a custom suffix once and `log_file` / `load_file` / `load_files` handle it
-  like a built-in format.
-- **Polars support**: `log_dataframe` / `log_file` accept polars DataFrame, Series and
-  LazyFrame (LazyFrame is collected on save); loaders accept `backend='polars'` to
-  return polars instead of pandas. Install via the `polars` extra.
-- **New built-in formats**: `.feather` (pandas/polars), `.npy` (numpy array),
-  `.npz` (dict of numpy arrays), `.svg` for figures.
-- Figures: `log_file` now saves both matplotlib and plotly figures to image suffixes.
-
-### Changed
-
-- `worker.log_file` / `load_file` are now generic over the registry; error messages for
-  unsupported suffixes list all registered suffixes.
-- `load_dataframe` gained an explicit `backend` parameter ('pandas' | 'polars').
-- `numpy` is declared as an explicit dependency.
-
 ## 0.3.0 (2026-07-14)
 
 ### Breaking changes
@@ -35,12 +12,28 @@
 - `requires-python` raised to `>=3.10` (the package never actually worked on older
   versions: `typing.TypeAlias` was used, which appeared in 3.10).
 
+### Added
+
+- **Format registry** (`mlflow_toolkit.formats`): file formats are resolved through
+  a suffix → handler registry instead of hard-coded `if/elif` chains. New public API:
+  `register_format`, `get_format_handler`, `registered_suffixes`, `FormatHandler` —
+  register a custom suffix once and `log_file` / `load_file` / `load_files` handle it
+  like a built-in format.
+- **Polars support**: `log_dataframe` / `log_file` accept polars DataFrame, Series and
+  LazyFrame (LazyFrame is collected on save); loaders accept `backend='polars'` to
+  return polars instead of pandas. Install via the `polars` extra.
+- **New built-in formats**: `.feather` (pandas/polars), `.npy` (numpy array),
+  `.npz` (dict of numpy arrays), `.svg` for figures.
+- Figures: `log_file` now saves both matplotlib and plotly figures to image suffixes.
+- Test suite, ruff config, `py.typed` marker, GitHub Actions CI and a PyPI publish
+  workflow triggered by GitHub releases.
+
 ### Fixed
 
 - `joblib` and `dill` were imported in a single `try` block: if only `dill` was missing,
   the `joblib` backend was silently disabled too. Now imported independently.
-- `pandas` and `pyarrow` are declared as dependencies (previously they worked only
-  because the full `mlflow` distribution pulls them in).
+- `pandas`, `pyarrow` and `numpy` are declared as dependencies (previously they worked
+  only because the full `mlflow` distribution pulls them in).
 - Artifact logging no longer relies on the private `MlflowClient._log_artifact_helper`,
   which could break on any MLflow update. The toolkit now has its own context manager.
 - `bytes` paths no longer crash path-inspection helpers (`os.fsdecode` is used).
@@ -53,6 +46,13 @@
 
 ### Changed
 
+- `worker.log_file` / `load_file` are generic over the format registry; error messages
+  for unsupported suffixes list all registered suffixes.
+- `load_dataframe` gained an explicit `backend` parameter ('pandas' | 'polars').
 - JSON dicts are saved indented by default (`indent=2`).
 - `pickle.dump/load` and `dill.dump/load` now receive `**kwargs`.
-- Added `py.typed` marker, test suite, ruff config and GitHub Actions CI.
+
+## 0.2.0
+
+- Initial release: `MLflowWorker` with log/load helpers for dataframes, dicts,
+  pickles and text files.
