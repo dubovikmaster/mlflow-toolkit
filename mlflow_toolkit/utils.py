@@ -19,6 +19,11 @@ try:
 except ImportError:
     dill = None
 
+try:
+    import polars as pl
+except ImportError:
+    pl = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,6 +51,11 @@ FlowListDumper.add_representer(list, represent_list_as_flow)
 FlowListDumper.add_representer(tuple, represent_tuple_as_flow)
 
 FilePath = str | bytes | PathLike
+
+if pl is not None:
+    DataFrameLike = pd.DataFrame | pd.Series | pl.DataFrame | pl.Series | pl.LazyFrame
+else:
+    DataFrameLike = pd.DataFrame | pd.Series
 
 
 class FileHandler:
@@ -166,25 +176,41 @@ class FileHandler:
             raise
 
     @staticmethod
-    def load_parquet_file(file_path: FilePath, **kwargs) -> pd.DataFrame:
+    def _resolve_dataframe_backend(backend: str | None) -> str:
         """
-        This static method is designed to load a Parquet file from the specified file
-        path and return its content as a pandas DataFrame. It employs the pandas
-        library's `read_parquet` method to load the file and allows additional keyword
-        arguments for customization. Logging is implemented to provide information
-        on the loading process, including both successful operations and errors.
+        Validates the dataframe backend name and checks that the corresponding
+        library is installed. Returns 'pandas' when backend is None.
+        """
+        backend = backend or 'pandas'
+        if backend not in ('pandas', 'polars'):
+            raise ValueError(f"Unsupported backend: {backend!r}. Supported backends are 'pandas' and 'polars'.")
+        if backend == 'polars' and pl is None:
+            raise ImportError("polars is not installed. Please install it to use this backend.")
+        return backend
+
+    @staticmethod
+    def load_parquet_file(file_path: FilePath, backend: str | None = None, **kwargs):
+        """
+        Loads a Parquet file from the specified file path and returns its content
+        as a pandas (default) or polars DataFrame.
 
         Parameters:
             file_path: The file path of the Parquet file to be loaded.
-            kwargs: Additional keyword arguments to be passed to `pd.read_parquet`.
+            backend: The dataframe library to load with: 'pandas' (default) or 'polars'.
+            kwargs: Additional keyword arguments to be passed to `pd.read_parquet`
+                or `pl.read_parquet`.
         Return:
-            A pandas DataFrame containing the data from the loaded Parquet file.
+            A pandas or polars DataFrame containing the data from the loaded Parquet file.
         Raises:
             Exception: If the loading process fails, the exception is caught, logged, and re-raised.
         """
+        backend = FileHandler._resolve_dataframe_backend(backend)
         try:
             logger.info(f"Loading Parquet file from: {file_path}")
-            df = pd.read_parquet(file_path, **kwargs)
+            if backend == 'polars':
+                df = pl.read_parquet(file_path, **kwargs)
+            else:
+                df = pd.read_parquet(file_path, **kwargs)
             logger.info(f"Parquet file loaded from: {file_path}")
             return df
         except Exception as e:
@@ -192,25 +218,30 @@ class FileHandler:
             raise
 
     @staticmethod
-    def load_csv_file(file_path: FilePath, **kwargs) -> pd.DataFrame:
+    def load_csv_file(file_path: FilePath, backend: str | None = None, **kwargs):
         """
-        Loads a CSV file into a pandas DataFrame. The function attempts to read the
-        file specified by the given file path, applying any additional keyword
-        arguments passed to customize the loading process.
+        Loads a CSV file into a pandas (default) or polars DataFrame. The function
+        attempts to read the file specified by the given file path, applying any
+        additional keyword arguments passed to customize the loading process.
 
         Parameters:
             file_path: Path to the CSV file to be loaded.
+            backend: The dataframe library to load with: 'pandas' (default) or 'polars'.
             kwargs: Additional keyword arguments passed to `pandas.read_csv`
-            to customize the file reading behavior.
+                or `polars.read_csv` to customize the file reading behavior.
         Returns:
-            A pandas DataFrame containing the data from the CSV file.
+            A pandas or polars DataFrame containing the data from the CSV file.
         Raises:
             Exception: If the CSV file cannot be loaded due to issues such as
             file not found, format mismatch, or other I/O errors.
         """
+        backend = FileHandler._resolve_dataframe_backend(backend)
         try:
             logger.info(f"Loading CSV file from: {file_path}")
-            df = pd.read_csv(file_path, **kwargs)
+            if backend == 'polars':
+                df = pl.read_csv(file_path, **kwargs)
+            else:
+                df = pd.read_csv(file_path, **kwargs)
             logger.info(f"CSV file loaded from: {file_path}")
             return df
         except Exception as e:
@@ -349,51 +380,76 @@ class FileHandler:
             raise
 
     @staticmethod
-    def save_dataframe_as_parquet_file(df: pd.DataFrame | pd.Series, file_path: FilePath, **kwargs):
+    def _normalize_polars(df):
         """
-        Save a DataFrame or Series object as a parquet file in the specified location using the PyArrow engine.
-        The function handles both DataFrame and Series objects appropriately. In case of an error during the
-        save operation, an exception is logged and re-raised.
+        Collects a polars LazyFrame and converts a polars Series to a DataFrame,
+        so that downstream code only deals with `pl.DataFrame`. Non-polars objects
+        are returned unchanged.
+        """
+        if pl is not None:
+            if isinstance(df, pl.LazyFrame):
+                df = df.collect()
+            if isinstance(df, pl.Series):
+                df = df.to_frame()
+        return df
+
+    @staticmethod
+    def save_dataframe_as_parquet_file(df: DataFrameLike, file_path: FilePath, **kwargs):
+        """
+        Save a pandas or polars DataFrame/Series (or a polars LazyFrame) as a parquet file
+        in the specified location. In case of an error during the save operation, an
+        exception is logged and re-raised.
 
         Parameters:
-            df (pd.DataFrame | pd.Series): The data object to save, which can be either a Pandas DataFrame or
-                                            Series.
-            file_path (Path): The directory in which the parquet file should be saved.
+            df: The data object to save: pandas DataFrame/Series, polars DataFrame/Series
+                or polars LazyFrame.
+            file_path (Path): The path where the parquet file should be saved.
 
         Raises:
-        Exception: If the parquet file could not be saved due to any reason, the exception is logged and
-                   re-raised.
+            TypeError: If `df` is not a supported dataframe type.
+            Exception: If the parquet file could not be saved, the exception is logged and re-raised.
         """
         logger.info(f"Saving dataframe to {file_path}")
         try:
-            if isinstance(df, pd.DataFrame):
+            df = FileHandler._normalize_polars(df)
+            if pl is not None and isinstance(df, pl.DataFrame):
+                df.write_parquet(file_path, **kwargs)
+            elif isinstance(df, pd.DataFrame):
                 df.to_parquet(file_path, **kwargs)
             elif isinstance(df, pd.Series):
                 df.to_frame().to_parquet(file_path, **kwargs)
+            else:
+                raise TypeError(f"Unsupported dataframe type: {type(df)!r}")
             logger.info("Dataframe saved successfully.")
         except Exception as e:
             logger.error(f"Failed to save dataframe to {file_path}. Error: {e}")
             raise
 
     @staticmethod
-    def save_dataframe_as_csv_file(df: pd.DataFrame | pd.Series, file_path: FilePath, **kwargs):
+    def save_dataframe_as_csv_file(df: DataFrameLike, file_path: FilePath, **kwargs):
         """
-        Saves a pandas DataFrame or Series to a CSV file.
+        Saves a pandas or polars DataFrame/Series (or a polars LazyFrame) to a CSV file.
 
-        This function allows saving the provided pandas DataFrame or Series to the
-        specified file path in CSV format. Additional parameters for the `to_csv`
-        method can be passed via keyword arguments. In case of an error during the
-        saving process, an exception is raised after logging the error details.
+        Additional parameters for the underlying `to_csv` / `write_csv` method can be
+        passed via keyword arguments. In case of an error during the saving process,
+        an exception is raised after logging the error details.
 
         Parameters:
-            df: A pandas DataFrame or Series to be saved as a CSV file.
+            df: The data object to save: pandas DataFrame/Series, polars DataFrame/Series
+                or polars LazyFrame.
             file_path: The destination file path where the CSV file will be saved.
-            kwargs: Additional keyword arguments passed to the `to_csv` method.
+            kwargs: Additional keyword arguments passed to `to_csv` / `write_csv`.
         Return: None
         """
         logger.info(f"Saving dataframe to {file_path}")
         try:
-            df.to_csv(file_path, **kwargs)
+            df = FileHandler._normalize_polars(df)
+            if pl is not None and isinstance(df, pl.DataFrame):
+                df.write_csv(file_path, **kwargs)
+            elif isinstance(df, (pd.DataFrame, pd.Series)):
+                df.to_csv(file_path, **kwargs)
+            else:
+                raise TypeError(f"Unsupported dataframe type: {type(df)!r}")
             logger.info("Dataframe saved successfully.")
         except Exception as e:
             logger.error(f"Failed to save dataframe to {file_path}. Error: {e}")
