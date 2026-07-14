@@ -1,6 +1,7 @@
 import ast
 import logging
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -18,6 +19,10 @@ from mlflow_toolkit.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_MAX_WORKERS = 8
+
+_SKIPPED = object()
 
 
 class MLflowWorker(MlflowClient):
@@ -170,20 +175,44 @@ class MLflowWorker(MlflowClient):
         with self._log_artifact_context(run_id, artifact_path) as tmp_path:
             handler.save(data, tmp_path, **kwargs)
 
-    def log_files(self, run_id: str, data: dict) -> None:
+    def log_files(self, run_id: str, data: dict, max_workers: int | None = None) -> None:
         """
         Logs multiple files into a given run identified by run_id. Each file is
         added as an artifact with the filename specified in the data dictionary's
         keys and corresponding file content from its values.
 
+        Artifacts are serialized and uploaded concurrently using a thread pool,
+        which speeds things up considerably on remote artifact stores (S3, GCS, ...).
+
         Parameters:
             run_id: Unique identifier for the run to which the files will be logged.
             data: A dictionary containing artifact paths as keys and their
                 corresponding file content as values to be logged into the run.
+            max_workers: Number of threads used to upload artifacts concurrently.
+                Defaults to min(8, number of files). Pass 1 to force sequential logging.
         Return: None
+        Raises:
+            The first exception raised by any upload; remaining uploads are cancelled.
         """
-        for file_name, file_content in data.items():
-            self.log_file(run_id, data=file_content, artifact_path=file_name)
+        if not data:
+            return
+        if max_workers is None:
+            max_workers = min(_DEFAULT_MAX_WORKERS, len(data))
+        if max_workers <= 1 or len(data) == 1:
+            for file_name, file_content in data.items():
+                self.log_file(run_id, data=file_content, artifact_path=file_name)
+            return
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(self.log_file, run_id, file_content, file_name): file_name
+                for file_name, file_content in data.items()
+            }
+            try:
+                for future in as_completed(futures):
+                    future.result()
+            except Exception:
+                pool.shutdown(cancel_futures=True)
+                raise
 
     def load_parquet_artifact(self, run_id: str, artifact_path: FilePath, **kwargs):
         """
@@ -328,7 +357,8 @@ class MLflowWorker(MlflowClient):
             else:
                 yield item.path
 
-    def load_files(self, run_id: str, artifact_path: FilePath | None = None) -> dict:
+    def load_files(self, run_id: str, artifact_path: FilePath | None = None,
+                   max_workers: int | None = None) -> dict:
         """
         Fetch and load artifacts associated with a specific run into memory.
 
@@ -337,23 +367,43 @@ class MLflowWorker(MlflowClient):
         different loading methods are applied to the files, and the loaded artifacts are
         stored in a dictionary. Unsupported file types are skipped, with a warning logged.
 
+        Artifacts are downloaded and deserialized concurrently using a thread pool,
+        which speeds things up considerably on remote artifact stores (S3, GCS, ...).
+
         Parameters:
             run_id: The unique identifier of the run whose artifacts are being fetched.
             artifact_path: The path to the directory containing the artifacts. Defaults to
                 the artifact root of the run.
+            max_workers: Number of threads used to download artifacts concurrently.
+                Defaults to min(8, number of files). Pass 1 to force sequential loading.
 
         Returns:
             dict: A dictionary where the keys are artifact paths (with extensions), and the
-                values are the loaded artifact contents.
+                values are the loaded artifact contents. Key order follows the artifact
+                listing regardless of which download finishes first.
         """
         logger.info(f"Fetching artifacts for run_id: {run_id}")
-        artifacts = {}
         path = str(artifact_path) if artifact_path is not None else None
-        for file_path in self._iter_artifact_files(run_id, path):
+        file_paths = list(self._iter_artifact_files(run_id, path))
+        if not file_paths:
+            return {}
+        if max_workers is None:
+            max_workers = min(_DEFAULT_MAX_WORKERS, len(file_paths))
+
+        def load_one(file_path: str):
             try:
-                artifacts[file_path] = self.load_file(run_id, file_path)
+                return self.load_file(run_id, file_path)
             except ValueError as e:
                 logger.warning(f"Skipping artifact {file_path}: {e}")
+                return _SKIPPED
+
+        if max_workers <= 1 or len(file_paths) == 1:
+            results = [load_one(file_path) for file_path in file_paths]
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                results = list(pool.map(load_one, file_paths))
+        artifacts = {file_path: value for file_path, value in zip(file_paths, results, strict=True)
+                     if value is not _SKIPPED}
         logger.info(f"Artifacts downloaded from {artifact_path}")
         return artifacts
 

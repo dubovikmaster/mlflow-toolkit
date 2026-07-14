@@ -226,6 +226,47 @@ class TestNewFormats:
         np.testing.assert_array_equal(loaded['y'], data['y'])
 
 
+class TestParallelIO:
+    def test_parallel_round_trip_mixed_formats(self, worker, run_id, df):
+        data = {f'par/dict_{i}.json': {'i': i} for i in range(10)}
+        data['par/frame.parquet'] = df
+        data['par/arr.npy'] = np.arange(5)
+        worker.log_files(run_id, data, max_workers=4)
+        loaded = worker.load_files(run_id, 'par', max_workers=4)
+        assert set(loaded) == set(data)
+        assert loaded['par/dict_7.json'] == {'i': 7}
+        pd.testing.assert_frame_equal(loaded['par/frame.parquet'], df)
+        np.testing.assert_array_equal(loaded['par/arr.npy'], data['par/arr.npy'])
+
+    def test_sequential_mode(self, worker, run_id):
+        data = {'seq/a.json': {'a': 1}, 'seq/b.yml': {'b': 2}}
+        worker.log_files(run_id, data, max_workers=1)
+        assert worker.load_files(run_id, 'seq', max_workers=1) == data
+
+    def test_error_propagates_in_parallel(self, worker, run_id):
+        data = {f'err/ok_{i}.json': {'i': i} for i in range(5)}
+        data['err/bad.unknown'] = object()
+        with pytest.raises(ValueError, match='Unsupported file type'):
+            worker.log_files(run_id, data, max_workers=4)
+
+    def test_parallel_load_skips_unsupported(self, worker, run_id, tmp_path):
+        blob = tmp_path / 'model.bin'
+        blob.write_bytes(b'\x00')
+        worker.log_artifact(run_id, str(blob), 'parmix')
+        worker.log_files(run_id, {f'parmix/ok_{i}.json': {'i': i} for i in range(6)}, max_workers=4)
+        loaded = worker.load_files(run_id, 'parmix', max_workers=4)
+        assert set(loaded) == {f'parmix/ok_{i}.json' for i in range(6)}
+
+    def test_empty_dict_is_noop(self, worker, run_id):
+        worker.log_files(run_id, {})
+        assert worker.load_files(run_id, 'does-not-exist') == {}
+
+    def test_key_order_follows_listing(self, worker, run_id):
+        worker.log_files(run_id, {f'ord/f_{i:02d}.json': {'i': i} for i in range(8)})
+        loaded = worker.load_files(run_id, 'ord', max_workers=4)
+        assert list(loaded) == sorted(loaded)
+
+
 class TestRunParams:
     def test_types_restored(self, worker, run_id):
         worker.log_param(run_id, 'iterations', 100)

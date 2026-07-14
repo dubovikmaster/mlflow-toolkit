@@ -25,6 +25,9 @@
 - **New built-in formats**: `.feather` (pandas/polars), `.npy` (numpy array),
   `.npz` (dict of numpy arrays), `.svg` for figures.
 - Figures: `log_file` now saves both matplotlib and plotly figures to image suffixes.
+- **Parallel batch I/O**: `log_files` / `load_files` upload and download artifacts
+  concurrently via a thread pool (default `min(8, n_files)` workers, `max_workers=1`
+  for the old sequential behavior).
 - Test suite, ruff config, `py.typed` marker, GitHub Actions CI and a PyPI publish
   workflow triggered by GitHub releases.
 

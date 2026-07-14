@@ -30,6 +30,8 @@ juggling are handled for you, inferred from the artifact path suffix.
   `log_file` / `load_file` / `load_files` a new suffix.
 - 📦 **Batch operations** — `load_files(run_id)` pulls a whole run's artifacts
   (recursively) into a dict of live objects.
+- ⚡ **Parallel by default** — batch upload/download runs on a thread pool, which
+  makes a real difference against remote artifact stores (S3, GCS, ...).
 - 🔢 **Typed run params** — `get_run_params` returns `100`, not `"100"`.
 - 🔌 **Drop-in** — `MLflowWorker` subclasses `mlflow.MlflowClient`: everything the
   client does, plus the helpers.
@@ -194,8 +196,17 @@ artifacts = worker.load_files(run_id)
 data = worker.load_files(run_id, 'data')
 ```
 
+Both methods serialize and transfer files **in parallel** (a thread pool of up to 8
+workers by default) — on S3-like artifact stores a batch of N files costs roughly one
+round-trip instead of N. Tune or disable it per call:
+
+```python
+worker.log_files(run_id, artifacts, max_workers=16)  # more concurrency
+worker.load_files(run_id, max_workers=1)             # strictly sequential
+```
+
 Files with no registered loader are skipped with a warning instead of failing the
-whole batch.
+whole batch; an upload error cancels the remaining uploads and re-raises.
 
 ## Typed run params
 
