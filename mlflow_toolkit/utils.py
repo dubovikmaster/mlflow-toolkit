@@ -1,24 +1,22 @@
 import json
-import yaml
-import pandas as pd
-from pathlib import Path
-from typing import (
-    Any,
-    Union,
-    Dict,
-    TypeAlias,
-    Optional,
-)
 import logging
 import pickle
-from os import PathLike
 import warnings
+from os import PathLike, fsdecode
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import yaml
 
 try:
     import joblib
-    import dill
 except ImportError:
     joblib = None
+
+try:
+    import dill
+except ImportError:
     dill = None
 
 logger = logging.getLogger(__name__)
@@ -47,7 +45,7 @@ def represent_tuple_as_flow(dumper, data):
 FlowListDumper.add_representer(list, represent_list_as_flow)
 FlowListDumper.add_representer(tuple, represent_tuple_as_flow)
 
-FilePath: TypeAlias = Union[str, bytes, PathLike]
+FilePath = str | bytes | PathLike
 
 
 class FileHandler:
@@ -72,8 +70,7 @@ class FileHandler:
         Returns:
             The detected backend as a string.
         """
-        if not isinstance(file_path, PathLike):
-            file_path = Path(file_path)
+        file_path = FileHandler._file_path_prepare(file_path)
         if file_path.suffix in ['.pkl', '.pickle']:
             return 'pickle'
         elif file_path.suffix == '.dill':
@@ -81,27 +78,28 @@ class FileHandler:
         elif file_path.suffix == '.joblib':
             return 'joblib'
         else:
-            warnings.warn(f"The serialization backend was not recognized. Set backend to 'pickle'")
+            warnings.warn(f"Unrecognized serialization suffix {file_path.suffix!r}. Set backend to 'pickle'",
+                          stacklevel=2)
             return 'pickle'
 
     @staticmethod
-    def _file_path_prepare(path: FilePath):
+    def _file_path_prepare(path: FilePath) -> Path:
         """
         Prepares and validates a file path input by ensuring it is of the correct
-        type. If the input is not already a Path-like object, it converts the
-        input into a Path instance.
+        type. Strings, bytes and os.PathLike objects are all converted to a
+        pathlib.Path instance.
 
         Parameters:
-            path: The input path which can be a string, bytes, or an object  implementing os.PathLike.
+            path: The input path which can be a string, bytes, or an object implementing os.PathLike.
         Return:
             A validated and converted Path object.
         """
-        if not isinstance(path, PathLike):
-            path = Path(path)
-        return path
+        if isinstance(path, Path):
+            return path
+        return Path(fsdecode(path))
 
     @staticmethod
-    def load_pickle_file(file_path: FilePath, backend: Optional[str] = None, **kwargs) -> Any:
+    def load_pickle_file(file_path: FilePath, backend: str | None = None, **kwargs) -> Any:
         """
         Static method to load and deserialize an object from a pickle file. It reads binary data
         from the given file path and reconstructs the original object using Python's pickle module.
@@ -126,12 +124,12 @@ class FileHandler:
         try:
             if backend == 'pickle':
                 with open(file_path, 'rb') as f:
-                    return pickle.load(f)
+                    return pickle.load(f, **kwargs)
             elif backend == 'dill':
                 if dill is None:
                     raise ImportError("dill is not installed. Please install it to use this backend.")
                 with open(file_path, 'rb') as f:
-                    return dill.load(f)
+                    return dill.load(f, **kwargs)
             elif backend == 'joblib':
                 if joblib is None:
                     raise ImportError("joblib is not installed. Please install it to use this backend.")
@@ -161,7 +159,7 @@ class FileHandler:
         """
         try:
             logger.info(f"Loading text file: {file_path}")
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, encoding='utf-8') as f:
                 return f.read()
         except Exception as e:
             logger.error(f"Failed to load text file {file_path}: {e}")
@@ -220,7 +218,7 @@ class FileHandler:
             raise
 
     @staticmethod
-    def load_dict(file_path: FilePath, **kwargs) -> Dict:
+    def load_dict(file_path: FilePath, **kwargs) -> dict:
         """
         Loads a dictionary from a specified file path. The file type must be either JSON or YAML.
         If the file type is unsupported, a ValueError is raised. This method ensures that the file
@@ -238,7 +236,7 @@ class FileHandler:
         """
         try:
             file_path = FileHandler._file_path_prepare(file_path)
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, encoding='utf-8') as f:
                 if FileHandler.is_json_file(file_path):
                     return json.load(f, **kwargs)
                 if FileHandler.is_yaml_file(file_path):
@@ -249,7 +247,7 @@ class FileHandler:
             raise
 
     @staticmethod
-    def save_dict(data: Dict, file_path: FilePath, **kwargs) -> None:
+    def save_dict(data: dict, file_path: FilePath, **kwargs) -> None:
         """
         Save a dictionary to a specified file path in either JSON or YAML format. The
         method determines the file format based on the file extension provided in the
@@ -272,6 +270,7 @@ class FileHandler:
             file_path = FileHandler._file_path_prepare(file_path)
             with open(file_path, 'w', encoding='utf-8') as f:
                 if FileHandler.is_json_file(file_path):
+                    kwargs.setdefault('indent', 2)
                     json.dump(data, f, **kwargs)
                 elif FileHandler.is_yaml_file(file_path):
                     yaml.dump(data, f, Dumper=FlowListDumper, **kwargs)
@@ -282,7 +281,7 @@ class FileHandler:
             raise
 
     @staticmethod
-    def save_pickle_file(obj, file_path: FilePath, backend: Optional[str] = None, **kwargs):
+    def save_pickle_file(obj, file_path: FilePath, backend: str | None = None, **kwargs):
         """
         Save an object to a pickle file.
 
@@ -305,12 +304,12 @@ class FileHandler:
         try:
             if backend == 'pickle':
                 with open(file_path, 'wb') as file:
-                    pickle.dump(obj, file)
+                    pickle.dump(obj, file, **kwargs)
             elif backend == 'dill':
                 if dill is None:
                     raise ImportError("dill is not installed. Please install it to use this backend.")
                 with open(file_path, 'wb') as file:
-                    dill.dump(obj, file)
+                    dill.dump(obj, file, **kwargs)
             elif backend == 'joblib':
                 if joblib is None:
                     raise ImportError("joblib is not installed. Please install it to use this backend.")
@@ -342,7 +341,7 @@ class FileHandler:
         """
         logger.info(f"Saving text to {file_path}")
         try:
-            with open(file_path, 'w') as file:
+            with open(file_path, 'w', encoding='utf-8') as file:
                 file.write(text)
             logger.info(f"{file_path} saved successfully.")
         except Exception as e:
@@ -350,7 +349,7 @@ class FileHandler:
             raise
 
     @staticmethod
-    def save_dataframe_as_parquet_file(df: Union[pd.DataFrame, pd.Series], file_path: FilePath, **kwargs):
+    def save_dataframe_as_parquet_file(df: pd.DataFrame | pd.Series, file_path: FilePath, **kwargs):
         """
         Save a DataFrame or Series object as a parquet file in the specified location using the PyArrow engine.
         The function handles both DataFrame and Series objects appropriately. In case of an error during the
@@ -371,13 +370,13 @@ class FileHandler:
                 df.to_parquet(file_path, **kwargs)
             elif isinstance(df, pd.Series):
                 df.to_frame().to_parquet(file_path, **kwargs)
-            logger.info(f"Dataframe saved successfully.")
+            logger.info("Dataframe saved successfully.")
         except Exception as e:
             logger.error(f"Failed to save dataframe to {file_path}. Error: {e}")
             raise
 
     @staticmethod
-    def save_dataframe_as_csv_file(df: Union[pd.DataFrame, pd.Series], file_path: FilePath, **kwargs):
+    def save_dataframe_as_csv_file(df: pd.DataFrame | pd.Series, file_path: FilePath, **kwargs):
         """
         Saves a pandas DataFrame or Series to a CSV file.
 
@@ -395,7 +394,7 @@ class FileHandler:
         logger.info(f"Saving dataframe to {file_path}")
         try:
             df.to_csv(file_path, **kwargs)
-            logger.info(f"Dataframe saved successfully.")
+            logger.info("Dataframe saved successfully.")
         except Exception as e:
             logger.error(f"Failed to save dataframe to {file_path}. Error: {e}")
             raise

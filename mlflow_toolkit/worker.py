@@ -1,20 +1,12 @@
-import tempfile
-from pathlib import Path
-from typing import (
-    Union,
-    Optional,
-    List,
-    Dict,
-)
-import logging
-from contextlib import contextmanager
 import ast
+import logging
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
 
 import pandas as pd
-
-import mlflow
 from mlflow import MlflowClient
-from mlflow.tracking.fluent import ActiveRun
+from mlflow.entities.model_registry import ModelVersion
 
 from mlflow_toolkit.utils import (
     FileHandler,
@@ -34,63 +26,91 @@ class MLflowWorker(MlflowClient):
     a simplified interface for working with MLflow artifacts, enabling users to
     easily serialize and store diverse data types within MLflow runs.
 
+    All ``log_*`` methods take ``(run_id, data, artifact_path)`` and all ``load_*``
+    methods take ``(run_id, artifact_path)``.
     """
-    def __init__(self, tracking_uri: Optional[str] = None, registry_uri: Optional[str] = None):
-        """
-        Parameters:
-            tracking_uri: Address of local or remote tracking server. If not provided, defaults
-                to the service set by ``mlflow.tracking.set_tracking_uri``. See
-                `Where Runs Get Recorded <../tracking.html#where-runs-get-recorded>`_
-                for more info.
-            registry_uri: Address of local or remote model registry server. If not provided,
-                defaults to the service set by ``mlflow.tracking.set_registry_uri``. If
-                no such service was set, defaults to the tracking uri of the client.
-        """
-        super().__init__(tracking_uri=tracking_uri, registry_uri=registry_uri)
 
-    def log_dataframe(self, run_id: str, data: Union[pd.Series, pd.DataFrame], artifact_path: FilePath,
-                      output_file_type: Optional[str] = None, **kwargs) -> None:
+    @contextmanager
+    def _log_artifact_context(self, run_id: str, artifact_path: FilePath):
+        """
+        Context manager that yields a temporary local path for a to-be-logged artifact
+        and uploads it under `artifact_path` of the run once the block exits.
+
+        Parameters:
+            run_id: The ID of the run to associate the artifact with.
+            artifact_path: The relative path (including the file name) under which
+                the artifact should be logged.
+        Return:
+            Yields the temporary local file path as a pathlib.Path object.
+        """
+        artifact_path = FileHandler._file_path_prepare(artifact_path)
+        artifact_dir = artifact_path.parent.as_posix()
+        artifact_dir = None if artifact_dir == '.' else artifact_dir
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir) / artifact_path.name
+            yield tmp_path
+            self.log_artifact(run_id, str(tmp_path), artifact_dir)
+
+    @contextmanager
+    def _load_artifact_context(self, run_id: str, artifact_path: FilePath):
+        """
+        Context manager for downloading an artifact into a temporary local directory.
+
+        This method helps in managing the temporary download of an artifact to a local
+        directory during its usage and ensures proper cleanup of resources.
+
+        Parameters:
+            run_id: Run identifier for the context in which the artifact is located.
+            artifact_path: Path to the artifact within the run context to be loaded.
+        Return:
+            Yields the path of the artifact's local copy as a pathlib.Path object.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            local_path = Path(self.download_artifacts(run_id, str(artifact_path), temp_dir))
+            yield local_path
+
+    def log_dataframe(self, run_id: str, data: pd.DataFrame | pd.Series, artifact_path: FilePath,
+                      output_file_type: str | None = None, **kwargs) -> None:
         """
         Log a Pandas DataFrame or Series as an artifact to a specific artifact path.
 
         The method saves the provided Pandas DataFrame or Series in the specified output
-        file format (either 'parquet' or 'csv') at the given `artifact_path`. This artifact
-        is then logged into the system using the associated `run_id`. Additional keyword
-        arguments can be passed to customize the behavior when saving the file.
+        file format (either 'parquet' or 'csv') at the given `artifact_path`. If
+        `output_file_type` is not provided, it is inferred from the artifact path suffix.
 
         Parameters:
             run_id: The ID of the run to associate this artifact with.
             data: The Pandas DataFrame or Series to be logged.
             artifact_path: The relative path under which the artifact should be logged.
             output_file_type: The output file format for the data. Must be either 'parquet'
-                    or 'csv'. Defaults to None.
+                    or 'csv'. Defaults to None (inferred from the suffix).
             kwargs: Additional keyword arguments applicable to the saving function for
                     the specified file type (e.g., compression options).
         Return: None
         Raises:
             ValueError: If an unsupported file type is provided.
         """
-        with self._log_artifact_helper(run_id=run_id, artifact_file=artifact_path) as tmp_path:
-            if output_file_type is None:
-                if FileHandler.is_parquet_file(artifact_path):
-                    output_file_type = 'parquet'
-                elif FileHandler.is_csv_file(artifact_path):
-                    output_file_type = 'csv'
+        if output_file_type is None:
+            if FileHandler.is_parquet_file(artifact_path):
+                output_file_type = 'parquet'
+            elif FileHandler.is_csv_file(artifact_path):
+                output_file_type = 'csv'
+        if output_file_type not in ('parquet', 'csv'):
+            raise ValueError(f"Unsupported file type: {output_file_type!r} for {artifact_path!r}. "
+                             f"Only 'parquet' and 'csv' are supported.")
+        with self._log_artifact_context(run_id, artifact_path) as tmp_path:
             if output_file_type == 'parquet':
                 FileHandler.save_dataframe_as_parquet_file(data, tmp_path, **kwargs)
-            elif output_file_type == 'csv':
-                FileHandler.save_dataframe_as_csv_file(data, tmp_path, **kwargs)
             else:
-                raise ValueError(f"Unsupported file type: {output_file_type}. "
-                                 f"Only .parquet and .csv are supported.")
+                FileHandler.save_dataframe_as_csv_file(data, tmp_path, **kwargs)
 
-    def log_as_pickle(self, run_id: str, data, artifact_path: str, **kwargs) -> None:
+    def log_as_pickle(self, run_id: str, data, artifact_path: FilePath, **kwargs) -> None:
         """
         Logs the provided data as a pickle file to the specified artifact path.
 
-        The method serializes the given `data` object into a pickle file and saves it to
-        the specified `artifact_path`. If a `run_id` is provided, the artifact is logged
-        under that specific run context.
+        The method serializes the given `data` object and saves it to the specified
+        `artifact_path`. The serialization backend ('pickle', 'dill' or 'joblib') is
+        inferred from the artifact path suffix.
 
         Parameters:
             run_id: The identifier of the run with which to associate the artifact.
@@ -98,25 +118,24 @@ class MLflowWorker(MlflowClient):
             artifact_path: The path where the pickle file will be saved.
         Return: None
         """
-        with self._log_artifact_helper(run_id=run_id, artifact_file=artifact_path) as tmp_path:
+        with self._log_artifact_context(run_id, artifact_path) as tmp_path:
             FileHandler.save_pickle_file(data, tmp_path, **kwargs)
 
-    def log_dict(self, run_id: str, data: dict, artifact_path: str, **kwargs) -> None:
+    def log_dict(self, run_id: str, data: dict, artifact_path: FilePath, **kwargs) -> None:
         """
         Logs a dictionary as an artifact to the specified run.
 
         This method facilitates logging a Python dictionary object as an artifact.
-        The dictionary is saved as a file into a temporary path, which is then logged
-        to the specified artifact path within the desired run. If no run_id is provided,
-        the method operates within an active or default run.
+        The dictionary is saved as a JSON or YAML file depending on the artifact
+        path suffix, and logged to the specified artifact path within the run.
 
         Parameters:
-            run_id: Optional identifier for the run where the artifact will be logged.
+            run_id: Identifier of the run where the artifact will be logged.
             data: The dictionary to be logged as an artifact.
             artifact_path: The relative path within the run where the dictionary artifact will be stored.
         Return: None
         """
-        with self._log_artifact_helper(run_id=run_id, artifact_file=artifact_path) as tmp_path:
+        with self._log_artifact_context(run_id, artifact_path) as tmp_path:
             FileHandler.save_dict(data, tmp_path, **kwargs)
 
     def log_file(self, run_id: str, data, artifact_path: FilePath, **kwargs) -> None:
@@ -126,21 +145,20 @@ class MLflowWorker(MlflowClient):
         This method handles different file types for logging, such as text files, pickle files,
         dataframes (CSV or Parquet), dictionaries (JSON or YAML), and image files. It determines
         the file type based on the artifact path and calls respective file-specific methods to
-        log the data as artifacts within the active MLflow run. Unsupported file types will
-        raise a `ValueError`.
+        log the data as artifacts. Unsupported file types will raise a `ValueError`.
 
         Parameters:
             run_id: Unique identifier for the MLflow run to which the artifact belongs.
             data: The data to be logged, which can vary in format depending on the file type.
             artifact_path: File path of the artifact to be logged. The file type is inferred
                 from the suffix of this path.
-            kwargs: Additional keyword arguments required for file-specific logging,
+            kwargs: Additional keyword arguments required for file-specific logging.
         Return: None
         """
         if FileHandler.is_pickle_file(artifact_path):
             self.log_as_pickle(run_id, data, artifact_path, **kwargs)
         elif FileHandler.is_text_file(artifact_path):
-            self.log_text(run_id, data, artifact_path)
+            self.log_text(run_id, data, str(artifact_path))
         elif FileHandler.is_parquet_file(artifact_path):
             self.log_dataframe(run_id, data, artifact_path, **kwargs)
         elif FileHandler.is_csv_file(artifact_path):
@@ -148,127 +166,92 @@ class MLflowWorker(MlflowClient):
         elif FileHandler.is_json_file(artifact_path) or FileHandler.is_yaml_file(artifact_path):
             self.log_dict(run_id, data, artifact_path, **kwargs)
         elif FileHandler.is_image_file(artifact_path):
-            self.log_figure(run_id, data, artifact_path, save_kwargs=kwargs)
+            self.log_figure(run_id, data, str(artifact_path), save_kwargs=kwargs)
         else:
-            raise ValueError(f"Unsupported file type {Path(artifact_path).suffix}.")
+            raise ValueError(f"Unsupported file type {Path(str(artifact_path)).suffix}.")
 
-    def log_files(self, run_id: str,  data: dict) -> None:
+    def log_files(self, run_id: str, data: dict) -> None:
         """
         Logs multiple files into a given run identified by run_id. Each file is
         added as an artifact with the filename specified in the data dictionary's
         keys and corresponding file content from its values.
 
         Parameters:
-        run_id: Unique identifier for the run to which the files
-            will be logged.
-        data: A dictionary containing filenames as keys and their
-            corresponding file content as values to be logged into the run.
-        Returns
-            The ActiveRun object associated with the specified run_id after
-            logging the files.
+            run_id: Unique identifier for the run to which the files will be logged.
+            data: A dictionary containing artifact paths as keys and their
+                corresponding file content as values to be logged into the run.
+        Return: None
         """
         for file_name, file_content in data.items():
             self.log_file(run_id, data=file_content, artifact_path=file_name)
 
-    @contextmanager
-    def _load_artifact_helpers(self, artifact_path: FilePath, run_id: str):
-        """
-        Context manager for loading an artifact as a local directory.
-
-        This method helps in managing the temporary download of an artifact to a local
-        directory during its usage and ensures proper cleanup of resources.
-
-        Parameters:
-            artifact_path: Path to the artifact within the run context to be loaded.
-            run_id: Run identifier for the context in which the artifact is located.
-        Return:
-            Yields the path of the artifact's local directory as a pathlib.Path object.
-        """
-        with tempfile.TemporaryDirectory() as temp_dir:
-            local_path = Path(self.download_artifacts(run_id, str(artifact_path), temp_dir))
-            yield local_path
-
-    def load_parquet_artifact(self, artifact_path: FilePath, run_id: str, **kwargs):
+    def load_parquet_artifact(self, run_id: str, artifact_path: FilePath, **kwargs) -> pd.DataFrame:
         """
         Loads a parquet artifact from the given path and returns it as a DataFrame.
 
-        This method retrieves a stored parquet artifact by handling the artifact's
-        path and associated run identifier. It uses a context manager to temporally
-        manage the local handling of the artifact and invokes the appropriate file
-        handler for loading the parquet file as a DataFrame. Additional keyword
-        arguments can be passed for configuration during the loading process.
-
         Parameters:
-            artifact_path: Path to the artifact to load.
             run_id: Identifier for the run associated with the artifact.
-            kwargs: Additional keyword arguments for loading configuration.
+            artifact_path: Path to the artifact to load.
+            kwargs: Additional keyword arguments for `pandas.read_parquet`.
         Return:
             The dataframe loaded from the parquet artifact.
         """
-        with self._load_artifact_helpers(artifact_path, run_id=run_id) as tmp_path:
-            df = FileHandler.load_parquet_file(tmp_path, **kwargs)
-            return df
+        with self._load_artifact_context(run_id, artifact_path) as tmp_path:
+            return FileHandler.load_parquet_file(tmp_path, **kwargs)
 
-    def load_csv_artifact(self, artifact_path: FilePath, run_id: str, **kwargs):
+    def load_csv_artifact(self, run_id: str, artifact_path: FilePath, **kwargs) -> pd.DataFrame:
         """
-        Loads a CSV artifact from a specified artifact path associated with a given run ID. This
-        function retrieves the artifact, temporarily stores it, and loads it as a DataFrame
-        using an appropriate file handler.
+        Loads a CSV artifact from a specified artifact path associated with a given run ID.
+
         Parameters:
-            artifact_path: The path to the artifact to be loaded.
             run_id: The identifier for the run associated with the artifact.
-            kwargs: Additional keyword arguments to pass to the file loading function.
+            artifact_path: The path to the artifact to be loaded.
+            kwargs: Additional keyword arguments for `pandas.read_csv`.
         Return:
             A DataFrame object containing the data from the CSV artifact.
         """
-        with self._load_artifact_helpers(artifact_path, run_id=run_id) as tmp_path:
-            df = FileHandler.load_csv_file(tmp_path, **kwargs)
-            return df
+        with self._load_artifact_context(run_id, artifact_path) as tmp_path:
+            return FileHandler.load_csv_file(tmp_path, **kwargs)
 
-    def load_text_artifact(self, artifact_path: FilePath, run_id: str):
+    def load_text_artifact(self, run_id: str, artifact_path: FilePath) -> str:
         """
-        Load a text artifact file from a specific run and return its content as a string. This
-        function closes the temporary file handlers after reading, ensuring that resources
-        are properly managed.
+        Load a text artifact file from a specific run and return its content as a string.
 
         Parameters:
+            run_id: The unique identifier for the run.
             artifact_path: The path to the artifact file within the run's artifacts.
-                           This is the relative path from the root directory of the run's  artifact storage.
-            run_id: The unique identifier for the run. Used to locate the specific run's
-                    artifact directory within the artifact storage system.
         Return:
             The content of the text artifact file as a string.
         """
-        with self._load_artifact_helpers(artifact_path, run_id=run_id) as tmp_path:
+        with self._load_artifact_context(run_id, artifact_path) as tmp_path:
             return FileHandler.load_text_file(tmp_path)
 
-    def load_pickle_artifact(self, artifact_path: FilePath, run_id: str, **kwargs):
+    def load_pickle_artifact(self, run_id: str, artifact_path: FilePath, **kwargs):
         """
-        Load a pickle artifact from a given artifact path and run ID. This method uses the
-        internal helper `_load_artifact_helpers` to retrieve and manage the temporary file
-        path of the stored artifact, then leverages the `FileHandler.load_pickle_file` method
-        to deserialize the content of the pickle file.
+        Load a pickle artifact from a given run ID and artifact path. The serialization
+        backend ('pickle', 'dill' or 'joblib') is inferred from the artifact path suffix.
 
         Parameters:
-            artifact_path: The relative path to the artifact within the storage system.
             run_id: The unique identifier of the run associated with the artifact.
+            artifact_path: The relative path to the artifact within the storage system.
         Return:
             The deserialized object loaded from the pickle file.
         """
-        with self._load_artifact_helpers(artifact_path, run_id=run_id) as tmp_path:
+        with self._load_artifact_context(run_id, artifact_path) as tmp_path:
             return FileHandler.load_pickle_file(tmp_path, **kwargs)
 
-    def load_dataframe(self, artifact_path: FilePath, run_id: str, file_type: Optional[str] = None, **kwargs):
+    def load_dataframe(self, run_id: str, artifact_path: FilePath,
+                       file_type: str | None = None, **kwargs) -> pd.DataFrame:
         """
-        Loads a DataFrame artifact from the specified path and run ID. The method supports
-        loading artifacts in both 'parquet' and 'csv' file formats. If an unsupported file
-        type is provided, an exception will be raised. Additional keyword arguments are
-        passed along to the specific loaders.
+        Loads a DataFrame artifact from the specified run ID and path. The method supports
+        loading artifacts in both 'parquet' and 'csv' file formats. If `file_type` is not
+        provided, it is inferred from the artifact path suffix.
 
         Parameters:
-            artifact_path: The path to the artifact to load.
             run_id: The identifier of the run from which the artifact is to be loaded.
-            file_type: The type of file to load. Must be either 'parquet' or 'csv'. Defaults to 'parquet'.
+            artifact_path: The path to the artifact to load.
+            file_type: The type of file to load. Must be either 'parquet' or 'csv'.
+                Defaults to None (inferred from the suffix).
             kwargs: Additional arguments to pass to the specific file loader.
         Return:
             A loaded DataFrame from the specified artifact path and run ID.
@@ -281,20 +264,16 @@ class MLflowWorker(MlflowClient):
             elif FileHandler.is_csv_file(artifact_path):
                 file_type = 'csv'
         if file_type == 'parquet':
-            return self.load_parquet_artifact(artifact_path, run_id, **kwargs)
+            return self.load_parquet_artifact(run_id, artifact_path, **kwargs)
         elif file_type == 'csv':
-            return self.load_csv_artifact(artifact_path, run_id, **kwargs)
+            return self.load_csv_artifact(run_id, artifact_path, **kwargs)
         else:
-            raise ValueError(f"Unsupported file type for artifact: {artifact_path}. "
+            raise ValueError(f"Unsupported file type for artifact: {artifact_path!r}. "
                              f"Only .parquet and .csv are supported.")
 
-    def load_dict(self, run_id: str, artifact_path: FilePath):
+    def load_dict(self, run_id: str, artifact_path: FilePath) -> dict:
         """
         Loads a dictionary object from the specified artifact path within the given run context.
-
-        This method utilizes an artifact helper to temporarily retrieve and handle the specified
-        artifact path. It ensures proper handling of resources while accessing the desired data in
-        the provided `run_id` and artifact location.
 
         Parameters:
             run_id: The unique identifier of the run from which the artifact is being loaded.
@@ -302,12 +281,12 @@ class MLflowWorker(MlflowClient):
         Return:
             A dictionary object loaded from the specified artifact path.
         """
-        with self._load_artifact_helpers(artifact_path, run_id=run_id) as tmp_path:
+        with self._load_artifact_context(run_id, artifact_path) as tmp_path:
             return FileHandler.load_dict(tmp_path)
 
     def load_file(self, run_id: str, artifact_path: FilePath, **kwargs):
         """
-        Load a file artifact from a specified path and run ID, using the appropriate
+        Load a file artifact from a specified run ID and path, using the appropriate
         file handler based on the artifact type. Supports various file formats
         including pickle, text, parquet, CSV, JSON, and YAML. Raises an error
         if the file format is not supported.
@@ -323,45 +302,63 @@ class MLflowWorker(MlflowClient):
              ValueError: If the file format of the artifact is unsupported.
         """
         if FileHandler.is_pickle_file(artifact_path):
-            data = self.load_pickle_artifact(artifact_path, run_id, **kwargs)
+            data = self.load_pickle_artifact(run_id, artifact_path, **kwargs)
         elif FileHandler.is_text_file(artifact_path):
-            data = self.load_text_artifact(artifact_path, run_id)
+            data = self.load_text_artifact(run_id, artifact_path)
         elif FileHandler.is_parquet_file(artifact_path) or FileHandler.is_csv_file(artifact_path):
-            data = self.load_dataframe(artifact_path, run_id, **kwargs)
+            data = self.load_dataframe(run_id, artifact_path, **kwargs)
         elif FileHandler.is_json_file(artifact_path) or FileHandler.is_yaml_file(artifact_path):
             data = self.load_dict(run_id, artifact_path)
         else:
-            raise ValueError(f"Unsupported file type for artifact: {artifact_path}.")
+            raise ValueError(f"Unsupported file type for artifact: {artifact_path!r}.")
         return data
 
-    def load_files(self, run_id: str, artifact_path: FilePath) -> dict:
+    def _iter_artifact_files(self, run_id: str, artifact_path: str | None = None):
+        """
+        Recursively yields the paths of all file artifacts of a run under `artifact_path`.
+
+        Parameters:
+            run_id: The unique identifier of the run whose artifacts are being listed.
+            artifact_path: The directory to start from. Defaults to the artifact root of the run.
+        Return:
+            Yields artifact file paths as strings.
+        """
+        for item in self.list_artifacts(run_id, artifact_path):
+            if item.is_dir:
+                yield from self._iter_artifact_files(run_id, item.path)
+            else:
+                yield item.path
+
+    def load_files(self, run_id: str, artifact_path: FilePath | None = None) -> dict:
         """
         Fetch and load artifacts associated with a specific run into memory.
 
-        Summary:
-        This method retrieves artifacts associated with a provided run ID and artifact path. The artifacts
-        are downloaded into a temporary directory. Based on the file extensions, different loading methods
-        are applied (e.g., '.pkl', '.txt', or '.parquet') to the files, and the loaded artifacts are stored
-        in a dictionary. Unsupported file types are skipped, with a warning logged. The method then returns
-        the dictionary containing the loaded artifacts.
+        This method recursively retrieves artifacts associated with a provided run ID and
+        artifact path, including files in nested directories. Based on the file extensions,
+        different loading methods are applied to the files, and the loaded artifacts are
+        stored in a dictionary. Unsupported file types are skipped, with a warning logged.
 
         Parameters:
-            run_id (str): The unique identifier of the run whose artifacts are being fetched.
-            artifact_path (str): The path to the directory containing the artifacts.
+            run_id: The unique identifier of the run whose artifacts are being fetched.
+            artifact_path: The path to the directory containing the artifacts. Defaults to
+                the artifact root of the run.
 
         Returns:
-        dict: A dictionary where the keys are artifact path (with extensions), and the values are the loaded
-              artifact contents.
+            dict: A dictionary where the keys are artifact paths (with extensions), and the
+                values are the loaded artifact contents.
         """
         logger.info(f"Fetching artifacts for run_id: {run_id}")
         artifacts = {}
-        artifacts_path_list = [i.path for i in self.list_artifacts(run_id, artifact_path) if not i.is_dir]
-        for file_path in artifacts_path_list:
-            artifacts[file_path] = self.load_file(run_id, file_path)
+        path = str(artifact_path) if artifact_path is not None else None
+        for file_path in self._iter_artifact_files(run_id, path):
+            try:
+                artifacts[file_path] = self.load_file(run_id, file_path)
+            except ValueError as e:
+                logger.warning(f"Skipping artifact {file_path}: {e}")
         logger.info(f"Artifacts downloaded from {artifact_path}")
         return artifacts
 
-    def get_run_params(self, run_id: str):
+    def get_run_params(self, run_id: str) -> dict:
         """
         Retrieve and parse the parameters of an MLflow run.
 
@@ -388,22 +385,20 @@ class MLflowWorker(MlflowClient):
                 params[key] = value
         return params
 
-    def get_latest_model_version(self, model_name: str):
+    def get_latest_model_version(self, model_name: str) -> ModelVersion | None:
         """
         Fetches the latest version information of a model based on the given model name.
 
         This function retrieves all available versions of a specified model by querying
         the client. It then determines the latest version by comparing the version
-        numbers of retrieved results. If no versions are found, an empty list is returned.
+        numbers of retrieved results. If no versions are found, None is returned.
 
         Parameters:
             model_name: Name of the model for which the latest version information needs to be fetched.
         Return:
-            The latest version information of the model, or an empty list if no versions are available.
+            The latest ModelVersion of the model, or None if no versions are available.
         """
-        # get all model versions
         model_versions = self.search_model_versions(f"name='{model_name}'")
-        # find latest version
         if model_versions:
             return max(model_versions, key=lambda x: int(x.version))
-        return []
+        return None
