@@ -4,11 +4,15 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
-import pandas as pd
 from mlflow import MlflowClient
 from mlflow.entities.model_registry import ModelVersion
 
+from mlflow_toolkit.formats import (
+    get_format_handler,
+    registered_suffixes,
+)
 from mlflow_toolkit.utils import (
+    DataFrameLike,
     FileHandler,
     FilePath,
 )
@@ -69,18 +73,19 @@ class MLflowWorker(MlflowClient):
             local_path = Path(self.download_artifacts(run_id, str(artifact_path), temp_dir))
             yield local_path
 
-    def log_dataframe(self, run_id: str, data: pd.DataFrame | pd.Series, artifact_path: FilePath,
+    def log_dataframe(self, run_id: str, data: DataFrameLike, artifact_path: FilePath,
                       output_file_type: str | None = None, **kwargs) -> None:
         """
-        Log a Pandas DataFrame or Series as an artifact to a specific artifact path.
+        Log a pandas or polars DataFrame/Series (or a polars LazyFrame) as an artifact
+        to a specific artifact path.
 
-        The method saves the provided Pandas DataFrame or Series in the specified output
-        file format (either 'parquet' or 'csv') at the given `artifact_path`. If
-        `output_file_type` is not provided, it is inferred from the artifact path suffix.
+        The method saves the provided data in the specified output file format (either
+        'parquet' or 'csv') at the given `artifact_path`. If `output_file_type` is not
+        provided, it is inferred from the artifact path suffix.
 
         Parameters:
             run_id: The ID of the run to associate this artifact with.
-            data: The Pandas DataFrame or Series to be logged.
+            data: The pandas/polars DataFrame or Series to be logged.
             artifact_path: The relative path under which the artifact should be logged.
             output_file_type: The output file format for the data. Must be either 'parquet'
                     or 'csv'. Defaults to None (inferred from the suffix).
@@ -142,33 +147,28 @@ class MLflowWorker(MlflowClient):
         """
         Logs and saves a file artifact to MLflow using the specified `run_id`.
 
-        This method handles different file types for logging, such as text files, pickle files,
-        dataframes (CSV or Parquet), dictionaries (JSON or YAML), and image files. It determines
-        the file type based on the artifact path and calls respective file-specific methods to
-        log the data as artifacts. Unsupported file types will raise a `ValueError`.
+        The file format is resolved from the artifact path suffix via the format registry
+        (see `mlflow_toolkit.register_format`). Built-in formats include parquet, csv,
+        feather, json, yaml, pickle/dill/joblib, text, numpy arrays and figures (images).
+        Unsupported file types raise a `ValueError`.
 
         Parameters:
             run_id: Unique identifier for the MLflow run to which the artifact belongs.
             data: The data to be logged, which can vary in format depending on the file type.
             artifact_path: File path of the artifact to be logged. The file type is inferred
                 from the suffix of this path.
-            kwargs: Additional keyword arguments required for file-specific logging.
+            kwargs: Additional keyword arguments passed to the format's save function.
         Return: None
+        Raises:
+            ValueError: If no format is registered for the artifact path suffix.
         """
-        if FileHandler.is_pickle_file(artifact_path):
-            self.log_as_pickle(run_id, data, artifact_path, **kwargs)
-        elif FileHandler.is_text_file(artifact_path):
-            self.log_text(run_id, data, str(artifact_path))
-        elif FileHandler.is_parquet_file(artifact_path):
-            self.log_dataframe(run_id, data, artifact_path, **kwargs)
-        elif FileHandler.is_csv_file(artifact_path):
-            self.log_dataframe(run_id, data, artifact_path, output_file_type='csv', **kwargs)
-        elif FileHandler.is_json_file(artifact_path) or FileHandler.is_yaml_file(artifact_path):
-            self.log_dict(run_id, data, artifact_path, **kwargs)
-        elif FileHandler.is_image_file(artifact_path):
-            self.log_figure(run_id, data, str(artifact_path), save_kwargs=kwargs)
-        else:
-            raise ValueError(f"Unsupported file type {Path(str(artifact_path)).suffix}.")
+        handler = get_format_handler(artifact_path)
+        if handler is None or handler.save is None:
+            raise ValueError(f"Unsupported file type for artifact: {artifact_path!r}. "
+                             f"Registered suffixes: {', '.join(registered_suffixes())}. "
+                             f"Use mlflow_toolkit.register_format() to add your own format.")
+        with self._log_artifact_context(run_id, artifact_path) as tmp_path:
+            handler.save(data, tmp_path, **kwargs)
 
     def log_files(self, run_id: str, data: dict) -> None:
         """
@@ -185,30 +185,32 @@ class MLflowWorker(MlflowClient):
         for file_name, file_content in data.items():
             self.log_file(run_id, data=file_content, artifact_path=file_name)
 
-    def load_parquet_artifact(self, run_id: str, artifact_path: FilePath, **kwargs) -> pd.DataFrame:
+    def load_parquet_artifact(self, run_id: str, artifact_path: FilePath, **kwargs):
         """
         Loads a parquet artifact from the given path and returns it as a DataFrame.
 
         Parameters:
             run_id: Identifier for the run associated with the artifact.
             artifact_path: Path to the artifact to load.
-            kwargs: Additional keyword arguments for `pandas.read_parquet`.
+            kwargs: Additional keyword arguments for the reader, e.g. ``backend='polars'``
+                to load with polars instead of pandas.
         Return:
-            The dataframe loaded from the parquet artifact.
+            The pandas (default) or polars dataframe loaded from the parquet artifact.
         """
         with self._load_artifact_context(run_id, artifact_path) as tmp_path:
             return FileHandler.load_parquet_file(tmp_path, **kwargs)
 
-    def load_csv_artifact(self, run_id: str, artifact_path: FilePath, **kwargs) -> pd.DataFrame:
+    def load_csv_artifact(self, run_id: str, artifact_path: FilePath, **kwargs):
         """
         Loads a CSV artifact from a specified artifact path associated with a given run ID.
 
         Parameters:
             run_id: The identifier for the run associated with the artifact.
             artifact_path: The path to the artifact to be loaded.
-            kwargs: Additional keyword arguments for `pandas.read_csv`.
+            kwargs: Additional keyword arguments for the reader, e.g. ``backend='polars'``
+                to load with polars instead of pandas.
         Return:
-            A DataFrame object containing the data from the CSV artifact.
+            A pandas (default) or polars DataFrame containing the data from the CSV artifact.
         """
         with self._load_artifact_context(run_id, artifact_path) as tmp_path:
             return FileHandler.load_csv_file(tmp_path, **kwargs)
@@ -241,7 +243,7 @@ class MLflowWorker(MlflowClient):
             return FileHandler.load_pickle_file(tmp_path, **kwargs)
 
     def load_dataframe(self, run_id: str, artifact_path: FilePath,
-                       file_type: str | None = None, **kwargs) -> pd.DataFrame:
+                       file_type: str | None = None, backend: str | None = None, **kwargs):
         """
         Loads a DataFrame artifact from the specified run ID and path. The method supports
         loading artifacts in both 'parquet' and 'csv' file formats. If `file_type` is not
@@ -252,9 +254,10 @@ class MLflowWorker(MlflowClient):
             artifact_path: The path to the artifact to load.
             file_type: The type of file to load. Must be either 'parquet' or 'csv'.
                 Defaults to None (inferred from the suffix).
+            backend: The dataframe library to load with: 'pandas' (default) or 'polars'.
             kwargs: Additional arguments to pass to the specific file loader.
         Return:
-            A loaded DataFrame from the specified artifact path and run ID.
+            A loaded pandas or polars DataFrame from the specified artifact path and run ID.
         Raises:
             ValueError: If an unsupported file type is provided.
         """
@@ -264,9 +267,9 @@ class MLflowWorker(MlflowClient):
             elif FileHandler.is_csv_file(artifact_path):
                 file_type = 'csv'
         if file_type == 'parquet':
-            return self.load_parquet_artifact(run_id, artifact_path, **kwargs)
+            return self.load_parquet_artifact(run_id, artifact_path, backend=backend, **kwargs)
         elif file_type == 'csv':
-            return self.load_csv_artifact(run_id, artifact_path, **kwargs)
+            return self.load_csv_artifact(run_id, artifact_path, backend=backend, **kwargs)
         else:
             raise ValueError(f"Unsupported file type for artifact: {artifact_path!r}. "
                              f"Only .parquet and .csv are supported.")
@@ -286,32 +289,28 @@ class MLflowWorker(MlflowClient):
 
     def load_file(self, run_id: str, artifact_path: FilePath, **kwargs):
         """
-        Load a file artifact from a specified run ID and path, using the appropriate
-        file handler based on the artifact type. Supports various file formats
-        including pickle, text, parquet, CSV, JSON, and YAML. Raises an error
+        Load a file artifact from a specified run ID and path, using the format registry
+        (see `mlflow_toolkit.register_format`). Built-in formats include parquet, csv,
+        feather, json, yaml, pickle/dill/joblib, text and numpy arrays. Raises an error
         if the file format is not supported.
 
         Parameters:
             run_id: A unique identifier for the run from which the artifact is being loaded.
             artifact_path: Path to the artifact file to be loaded.
-            kwargs: Additional keyword arguments required for file-specific
-                loading, applicable for certain file formats like CSV or parquet.
+            kwargs: Additional keyword arguments passed to the format's load function
+                (e.g. ``backend='polars'`` for dataframe formats).
         Return:
             The loaded data, whose format depends on the file type.
         Raises:
-             ValueError: If the file format of the artifact is unsupported.
+             ValueError: If no format with a loader is registered for the artifact path suffix.
         """
-        if FileHandler.is_pickle_file(artifact_path):
-            data = self.load_pickle_artifact(run_id, artifact_path, **kwargs)
-        elif FileHandler.is_text_file(artifact_path):
-            data = self.load_text_artifact(run_id, artifact_path)
-        elif FileHandler.is_parquet_file(artifact_path) or FileHandler.is_csv_file(artifact_path):
-            data = self.load_dataframe(run_id, artifact_path, **kwargs)
-        elif FileHandler.is_json_file(artifact_path) or FileHandler.is_yaml_file(artifact_path):
-            data = self.load_dict(run_id, artifact_path)
-        else:
-            raise ValueError(f"Unsupported file type for artifact: {artifact_path!r}.")
-        return data
+        handler = get_format_handler(artifact_path)
+        if handler is None or handler.load is None:
+            raise ValueError(f"Unsupported file type for artifact: {artifact_path!r}. "
+                             f"Registered suffixes: {', '.join(registered_suffixes())}. "
+                             f"Use mlflow_toolkit.register_format() to add your own format.")
+        with self._load_artifact_context(run_id, artifact_path) as tmp_path:
+            return handler.load(tmp_path, **kwargs)
 
     def _iter_artifact_files(self, run_id: str, artifact_path: str | None = None):
         """

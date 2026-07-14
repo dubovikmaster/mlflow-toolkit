@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.0 (2026-07-14)
+
+### Added
+
+- **Format registry** (`mlflow_toolkit.formats`): file formats are now resolved through
+  a suffix → handler registry instead of hard-coded `if/elif` chains. New public API:
+  `register_format`, `get_format_handler`, `registered_suffixes`, `FormatHandler` —
+  register a custom suffix once and `log_file` / `load_file` / `load_files` handle it
+  like a built-in format.
+- **Polars support**: `log_dataframe` / `log_file` accept polars DataFrame, Series and
+  LazyFrame (LazyFrame is collected on save); loaders accept `backend='polars'` to
+  return polars instead of pandas. Install via the `polars` extra.
+- **New built-in formats**: `.feather` (pandas/polars), `.npy` (numpy array),
+  `.npz` (dict of numpy arrays), `.svg` for figures.
+- Figures: `log_file` now saves both matplotlib and plotly figures to image suffixes.
+
+### Changed
+
+- `worker.log_file` / `load_file` are now generic over the registry; error messages for
+  unsupported suffixes list all registered suffixes.
+- `load_dataframe` gained an explicit `backend` parameter ('pandas' | 'polars').
+- `numpy` is declared as an explicit dependency.
+
 ## 0.3.0 (2026-07-14)
 
 ### Breaking changes

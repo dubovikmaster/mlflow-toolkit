@@ -10,12 +10,14 @@ path suffix.
 
 ## Features
 
-- `log_dataframe` / `load_dataframe` — pandas DataFrame or Series as `.parquet` or `.csv`
+- `log_dataframe` / `load_dataframe` — pandas **or polars** DataFrame/Series as `.parquet`, `.csv`, `.feather`
 - `log_dict` / `load_dict` — dict as `.json`, `.yml` / `.yaml`
 - `log_as_pickle` / `load_pickle_artifact` — any object via `pickle`, `dill` or `joblib`
   (backend inferred from `.pkl` / `.dill` / `.joblib` suffix)
-- `log_file` / `load_file` — single entry point, format inferred from the suffix
-- `log_files` / `load_files` — batch logging/loading of whole artifact directories
+- `log_file` / `load_file` — single entry point, format resolved from the suffix via
+  an extensible **format registry** (`.npy`, `.npz` numpy arrays, matplotlib/plotly
+  figures as images, and anything you register yourself)
+- `log_files` / `load_files` — batch logging/loading of whole artifact directories (recursive)
 - `get_run_params` — run params with Python types restored (MLflow stores them as strings)
 - `get_latest_model_version` — latest registered model version without deprecated stages
 
@@ -25,6 +27,8 @@ path suffix.
 pip install git+https://github.com/dubovikmaster/mlflow-toolkit.git
 # with dill/joblib backends:
 pip install "mlflow-toolkit[extras] @ git+https://github.com/dubovikmaster/mlflow-toolkit.git"
+# with polars support:
+pip install "mlflow-toolkit[polars] @ git+https://github.com/dubovikmaster/mlflow-toolkit.git"
 ```
 
 Requires Python >= 3.10.
@@ -73,6 +77,40 @@ features_loaded = worker.load_text_artifact(run_id, 'features.txt').splitlines()
 # or load a whole directory at once
 artifacts = worker.load_files(run_id)
 # {'data/train_data.parquet': <DataFrame>, 'params.yml': {...}, ...}
+```
+
+### Polars
+
+Polars DataFrames, Series and LazyFrames are logged the same way — the type is
+detected automatically. To load back as polars instead of pandas, pass `backend='polars'`:
+
+```python
+import polars as pl
+
+pl_df = pl.DataFrame({'a': [1, 2, 3], 'b': ['x', 'y', 'z']})
+
+worker.log_dataframe(run_id, pl_df, 'data/frame.parquet')      # polars in
+df = worker.load_dataframe(run_id, 'data/frame.parquet')       # pandas out (default)
+pl_df = worker.load_dataframe(run_id, 'data/frame.parquet', backend='polars')  # polars out
+```
+
+### Custom formats
+
+`log_file` / `load_file` / `load_files` resolve formats through a registry.
+Register your own suffix and it behaves like a built-in one:
+
+```python
+import pandas as pd
+from mlflow_toolkit import register_format
+
+register_format(
+    'excel', ['.xlsx'],
+    save=lambda df, path, **kw: df.to_excel(path, **kw),
+    load=lambda path, **kw: pd.read_excel(path, **kw),
+)
+
+worker.log_file(run_id, df, 'report.xlsx')
+df = worker.load_file(run_id, 'report.xlsx')
 ```
 
 ### Typed run params

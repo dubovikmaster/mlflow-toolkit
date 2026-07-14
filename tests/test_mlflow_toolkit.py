@@ -2,9 +2,10 @@ import warnings
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
 
-from mlflow_toolkit import MLflowWorker
+from mlflow_toolkit import MLflowWorker, register_format, registered_suffixes
 from mlflow_toolkit.utils import FileHandler
 
 
@@ -133,6 +134,96 @@ class TestLogLoadFile:
         worker.log_file(run_id, {'a': 1}, 'mixed/ok.json')
         artifacts = worker.load_files(run_id, 'mixed')
         assert artifacts == {'mixed/ok.json': {'a': 1}}
+
+
+class TestFormatRegistry:
+    def test_custom_format_round_trip(self, worker, run_id):
+        register_format(
+            'upper-text', ['.uptxt'],
+            save=lambda data, path, **kw: FileHandler.save_text_file(data.upper(), path),
+            load=lambda path, **kw: FileHandler.load_text_file(path),
+        )
+        worker.log_file(run_id, 'hello', 'custom/greeting.uptxt')
+        assert worker.load_file(run_id, 'custom/greeting.uptxt') == 'HELLO'
+
+    def test_duplicate_suffix_raises(self):
+        with pytest.raises(ValueError, match='already registered'):
+            register_format('json2', ['.json'], save=lambda d, p, **kw: None)
+
+    def test_overwrite_allowed(self):
+        register_format('tmp-fmt', ['.tmpfmt'], save=lambda d, p, **kw: None)
+        register_format('tmp-fmt-v2', ['.tmpfmt'], save=lambda d, p, **kw: None, overwrite=True)
+
+    def test_requires_save_or_load(self):
+        with pytest.raises(ValueError, match='save.*load'):
+            register_format('empty', ['.empty'])
+
+    def test_builtin_suffixes_registered(self):
+        assert {'.parquet', '.csv', '.json', '.yml', '.pkl', '.txt', '.npy', '.feather'} <= set(registered_suffixes())
+
+    def test_save_only_format_cannot_load(self, worker, run_id):
+        with pytest.raises(ValueError, match='Unsupported file type'):
+            worker.load_file(run_id, 'figure.png')
+
+    def test_non_figure_to_image_raises(self, worker, run_id):
+        with pytest.raises(TypeError, match='figure'):
+            worker.log_file(run_id, 'not a figure', 'plot.png')
+
+
+class TestPolars:
+    @pytest.fixture()
+    def pl_df(self):
+        return pl.DataFrame({'a': [1, 2, 3], 'b': ['x', 'y', 'z']})
+
+    @pytest.mark.parametrize('artifact_path', ['pl/data.parquet', 'pl/data.csv', 'pl/data.feather'])
+    def test_round_trip(self, worker, run_id, pl_df, artifact_path):
+        worker.log_file(run_id, pl_df, artifact_path)
+        loaded = worker.load_file(run_id, artifact_path, backend='polars')
+        assert loaded.equals(pl_df)
+
+    def test_lazyframe_collected_on_save(self, worker, run_id, pl_df):
+        worker.log_dataframe(run_id, pl_df.lazy(), 'pl/lazy.parquet')
+        loaded = worker.load_dataframe(run_id, 'pl/lazy.parquet', backend='polars')
+        assert loaded.equals(pl_df)
+
+    def test_polars_series(self, worker, run_id, pl_df):
+        worker.log_dataframe(run_id, pl_df['a'], 'pl/series.parquet')
+        loaded = worker.load_dataframe(run_id, 'pl/series.parquet', backend='polars')
+        assert loaded['a'].to_list() == [1, 2, 3]
+
+    def test_load_pandas_by_default(self, worker, run_id, pl_df):
+        worker.log_dataframe(run_id, pl_df, 'pl/default.parquet')
+        loaded = worker.load_dataframe(run_id, 'pl/default.parquet')
+        assert isinstance(loaded, pd.DataFrame)
+
+    def test_unknown_backend_raises(self, worker, run_id, pl_df):
+        worker.log_dataframe(run_id, pl_df, 'pl/backend.parquet')
+        with pytest.raises(ValueError, match='Unsupported backend'):
+            worker.load_dataframe(run_id, 'pl/backend.parquet', backend='dask')
+
+    def test_unsupported_data_type_raises(self, worker, run_id):
+        with pytest.raises(TypeError, match='Unsupported dataframe type'):
+            worker.log_dataframe(run_id, {'not': 'a dataframe'}, 'pl/bad.parquet')
+
+
+class TestNewFormats:
+    def test_feather_round_trip(self, worker, run_id, df):
+        worker.log_file(run_id, df, 'nf/data.feather')
+        loaded = worker.load_file(run_id, 'nf/data.feather')
+        pd.testing.assert_frame_equal(loaded, df)
+
+    def test_npy_round_trip(self, worker, run_id):
+        arr = np.random.random((5, 3))
+        worker.log_file(run_id, arr, 'nf/arr.npy')
+        np.testing.assert_array_equal(worker.load_file(run_id, 'nf/arr.npy'), arr)
+
+    def test_npz_round_trip(self, worker, run_id):
+        data = {'x': np.arange(10), 'y': np.eye(3)}
+        worker.log_file(run_id, data, 'nf/arrays.npz')
+        loaded = worker.load_file(run_id, 'nf/arrays.npz')
+        assert set(loaded) == {'x', 'y'}
+        np.testing.assert_array_equal(loaded['x'], data['x'])
+        np.testing.assert_array_equal(loaded['y'], data['y'])
 
 
 class TestRunParams:
